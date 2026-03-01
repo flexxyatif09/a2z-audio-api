@@ -7,7 +7,6 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
-// 🔥 THE FIX: Render ko directly FFmpeg engine ka rasta batana 🔥
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const app = express();
@@ -21,19 +20,76 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const upload = multer({ dest: '/tmp/' });
 
 app.get('/', (req, res) => {
-    res.send("A2Z Anime Audio API is Running!");
+    res.send("A2Z Anime Multi-Track API is Running! 🚀");
 });
 
-app.post('/extract-audio', upload.single('video'), (req, res) => {
+app.post('/extract-audio', upload.single('video'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No video uploaded' });
 
-    const outPath = path.join('/tmp/', `audio_${Date.now()}.mp3`);
-    const trackStr = req.body.track || '0:a:0';
-    const titleStr = req.body.title || 'Untitled Audio';
+    const titleStr = req.body.title || 'Untitled';
+    let tracks = [];
     
-    console.log(`Extracting track ${trackStr} from ${req.file.originalname}`);
+    // Parse the array of selected tracks sent from frontend
+    try {
+        tracks = JSON.parse(req.body.tracks);
+    } catch (e) {
+        tracks = [{ id: '0:a:0', label: 'Default' }];
+    }
 
-    ffmpeg(req.file.path)
+    console.log(`Processing ${tracks.length} tracks for: ${titleStr}`);
+
+    try {
+        // Sequential Processing loop (Ek-ek karke process karega taaki RAM bache)
+        for (const track of tracks) {
+            console.log(`Extracting: ${track.label} (${track.id})`);
+            const outPath = path.join('/tmp/', `audio_${Date.now()}_${track.label}.mp3`);
+
+            // FFmpeg ko Promise me wrap kiya taaki wait kare
+            await new Promise((resolve, reject) => {
+                ffmpeg(req.file.path)
+                    .outputOptions([`-map ${track.id}`, '-c:a libmp3lame', '-b:a 128k', '-ac 1'])
+                    .save(outPath)
+                    .on('end', resolve)
+                    .on('error', reject);
+            });
+
+            // 1. Upload to Storage
+            const buffer = fs.readFileSync(outPath);
+            const fileName = `audio_${Date.now()}_${track.label}.mp3`;
+            const { error: uploadError } = await supabase.storage
+                .from('extracted_audios')
+                .upload(`public/${fileName}`, buffer, { contentType: 'audio/mpeg' });
+
+            if (uploadError) throw uploadError;
+
+            // 2. Get URL
+            const { data: urlData } = supabase.storage.from('extracted_audios').getPublicUrl(`public/${fileName}`);
+            
+            // 3. Save to DB (Title ke aage language ka naam jud jayega)
+            const finalTitle = `${titleStr} - ${track.label}`;
+            const { error: dbError } = await supabase
+                .from('video_audio_tracks')
+                .insert([{ video_title: finalTitle, audio_url: urlData.publicUrl }]);
+
+            if (dbError) throw dbError;
+
+            // 4. Delete Extracted MP3 to clear server RAM
+            fs.unlinkSync(outPath);
+        }
+
+        // Jab saare tracks nikal jayein, tab original video delete karein
+        fs.unlinkSync(req.file.path);
+        res.json({ success: true, message: `Successfully extracted ${tracks.length} tracks!` });
+
+    } catch (err) {
+        console.error('Server Processing Error:', err);
+        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path); // Cleanup on crash
+        res.status(500).json({ error: 'Failed during multi-track extraction. Check server logs.' });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server Ready on port ${PORT} 🚀`));
         .outputOptions([`-map ${trackStr}`, '-c:a libmp3lame', '-b:a 128k', '-ac 1'])
         .save(outPath)
         .on('end', async () => {
