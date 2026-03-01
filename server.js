@@ -7,6 +7,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
+// FFmpeg Path Setup
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const app = express();
@@ -29,22 +30,23 @@ app.post('/extract-audio', upload.single('video'), async (req, res) => {
     const titleStr = req.body.title || 'Untitled';
     let tracks = [];
     
-    // Parse the array of selected tracks sent from frontend
+    // Naya Logic: Frontend se aaye multiple tracks ko padhna
     try {
         tracks = JSON.parse(req.body.tracks);
+        if (!Array.isArray(tracks) || tracks.length === 0) throw new Error("Empty tracks");
     } catch (e) {
+        console.log("Fallback to default track due to missing data");
         tracks = [{ id: '0:a:0', label: 'Default' }];
     }
 
     console.log(`Processing ${tracks.length} tracks for: ${titleStr}`);
 
     try {
-        // Sequential Processing loop (Ek-ek karke process karega taaki RAM bache)
+        // Sequential Loop: Ek-ek karke saare tracks nikalega taaki RAM crash na ho
         for (const track of tracks) {
             console.log(`Extracting: ${track.label} (${track.id})`);
             const outPath = path.join('/tmp/', `audio_${Date.now()}_${track.label}.mp3`);
 
-            // FFmpeg ko Promise me wrap kiya taaki wait kare
             await new Promise((resolve, reject) => {
                 ffmpeg(req.file.path)
                     .outputOptions([`-map ${track.id}`, '-c:a libmp3lame', '-b:a 128k', '-ac 1'])
@@ -53,7 +55,7 @@ app.post('/extract-audio', upload.single('video'), async (req, res) => {
                     .on('error', reject);
             });
 
-            // 1. Upload to Storage
+            // 1. Upload to Supabase
             const buffer = fs.readFileSync(outPath);
             const fileName = `audio_${Date.now()}_${track.label}.mp3`;
             const { error: uploadError } = await supabase.storage
@@ -62,10 +64,10 @@ app.post('/extract-audio', upload.single('video'), async (req, res) => {
 
             if (uploadError) throw uploadError;
 
-            // 2. Get URL
+            // 2. Get Public URL
             const { data: urlData } = supabase.storage.from('extracted_audios').getPublicUrl(`public/${fileName}`);
             
-            // 3. Save to DB (Title ke aage language ka naam jud jayega)
+            // 3. Save to DB with Language Name (e.g., "Naruto Ep 1 - Hindi")
             const finalTitle = `${titleStr} - ${track.label}`;
             const { error: dbError } = await supabase
                 .from('video_audio_tracks')
@@ -73,65 +75,21 @@ app.post('/extract-audio', upload.single('video'), async (req, res) => {
 
             if (dbError) throw dbError;
 
-            // 4. Delete Extracted MP3 to clear server RAM
+            // 4. Delete temp audio file
             fs.unlinkSync(outPath);
         }
 
-        // Jab saare tracks nikal jayein, tab original video delete karein
-        fs.unlinkSync(req.file.path);
+        // Saare tracks nikalne ke baad original video delete karein
+        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        
+        // Yeh message wahan 'undefined' ki jagah aayega
         res.json({ success: true, message: `Successfully extracted ${tracks.length} tracks!` });
 
     } catch (err) {
         console.error('Server Processing Error:', err);
-        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path); // Cleanup on crash
+        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
         res.status(500).json({ error: 'Failed during multi-track extraction. Check server logs.' });
     }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server Ready on port ${PORT} 🚀`));
-        .outputOptions([`-map ${trackStr}`, '-c:a libmp3lame', '-b:a 128k', '-ac 1'])
-        .save(outPath)
-        .on('end', async () => {
-            try {
-                const buffer = fs.readFileSync(outPath);
-                const fileName = `audio_${Date.now()}.mp3`;
-                
-                // Upload to Supabase Storage
-                const { error: uploadError } = await supabase.storage
-                    .from('extracted_audios')
-                    .upload(`public/${fileName}`, buffer, { contentType: 'audio/mpeg' });
-
-                if (uploadError) throw uploadError;
-
-                // Get Public URL
-                const { data } = supabase.storage
-                    .from('extracted_audios')
-                    .getPublicUrl(`public/${fileName}`);
-                
-                // Save to Database
-                const { error: dbError } = await supabase
-                    .from('video_audio_tracks')
-                    .insert([{ video_title: titleStr, audio_url: data.publicUrl }]);
-
-                if (dbError) throw dbError;
-
-                res.json({ success: true, url: data.publicUrl });
-
-            } catch (err) {
-                console.error("Database/Upload Error:", err);
-                res.status(500).json({ error: err.message });
-            } finally {
-                // Safely delete temp files
-                if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-                if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
-            }
-        })
-        .on('error', (err) => {
-            console.error('FFmpeg Processing Error:', err);
-            res.status(500).json({ error: 'Failed to extract audio on server.' });
-            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-        });
 });
 
 const PORT = process.env.PORT || 3000;
